@@ -49,6 +49,8 @@ from database.search_engine import (
     GLOBAL_SEARCH_ANALYTICS,
     build_search_buttons,
     build_empty_filter_buttons,
+    build_pagination_row,
+    format_button_label,
     validate_callback_data,
 )
 
@@ -362,3 +364,117 @@ def test_v9_diagnostics_escaping_and_analytics_mapping():
     assert stats["total_queries"] == 1
     assert stats["active_filters_used"] == 1
     assert stats["avg_latency_ms"] == 42.5
+
+
+# ==============================================================================
+# TEST 11: BACK BUTTON, DYNAMIC PAGINATION & RESET FILTERS INTEGRITY
+# ==============================================================================
+
+def test_v9_back_button_and_reset_filters():
+    # 1. Dynamic Pagination: Page 1 -> Page 2 -> Page 3 -> Back to Page 2 -> Back to Page 1
+    # 25 total items, page size 10 (Total 3 pages)
+    req = "12345"
+    key = "chat-msg-1"
+
+    # Page 1 (offset 0)
+    p1 = build_pagination_row(key, req, current_offset=0, total_results=25, page_size=10)
+    assert len(p1) == 3
+    assert p1[0].text == "ᴘᴀɢᴇ"
+    assert p1[1].text == "1 / 3"
+    assert p1[2].text == "ɴᴇxᴛ ⋟"
+    assert p1[2].callback_data == f"next_{req}_{key}_10"
+
+    # Page 2 (offset 10)
+    p2 = build_pagination_row(key, req, current_offset=10, total_results=25, page_size=10)
+    assert len(p2) == 3
+    assert p2[0].text == "⋞ ʙᴀᴄᴋ"
+    assert p2[0].callback_data == f"next_{req}_{key}_0"
+    assert p2[1].text == "2 / 3"
+    assert p2[2].text == "ɴᴇxᴛ ⋟"
+    assert p2[2].callback_data == f"next_{req}_{key}_20"
+
+    # Page 3 (offset 20)
+    p3 = build_pagination_row(key, req, current_offset=20, total_results=25, page_size=10)
+    assert len(p3) == 2
+    assert p3[0].text == "⋞ ʙᴀᴄᴋ"
+    assert p3[0].callback_data == f"next_{req}_{key}_10"
+    assert p3[1].text == "3 / 3"
+
+    # Click Back from Page 3 -> arrives at Page 2 (offset 10)
+    p2_back = build_pagination_row(key, req, current_offset=10, total_results=25, page_size=10)
+    assert len(p2_back) == 3
+    assert p2_back[0].text == "⋞ ʙᴀᴄᴋ"
+    assert p2_back[2].text == "ɴᴇxᴛ ⋟"
+
+    # Click Back from Page 2 -> arrives at Page 1 (offset 0)
+    p1_back = build_pagination_row(key, req, current_offset=0, total_results=25, page_size=10)
+    assert len(p1_back) == 3
+    assert p1_back[0].text == "ᴘᴀɢᴇ"
+    assert p1_back[1].text == "1 / 3"
+    assert p1_back[2].text == "ɴᴇxᴛ ⋟"
+    # Verification: Next and Back buttons NEVER disappear!
+
+    # Single-page check (total 4 <= page size 10)
+    p_single = build_pagination_row(key, req, current_offset=0, total_results=4, page_size=10)
+    assert len(p_single) == 1
+    assert "ɴᴏ ᴍᴏʀᴇ ᴘᴀɢᴇꜱ ᴀᴠᴀɪʟᴀʙʟᴇ" in p_single[0].text
+
+    # 2. SearchCache: next_offset is ALWAYS a valid string integer and NEVER str(files)
+    cache = SearchCache()
+    dummy_files = [MockMedia("1", "File 1"), MockMedia("2", "File 2")]
+    cache.set("test_key", dummy_files, "10", 25)
+    cached = cache.get("test_key")
+    assert cached is not None
+    c_files, c_next, c_total = cached
+    assert c_files == dummy_files
+    assert c_next == "10"
+    assert int(c_next) == 10
+    assert c_total == 25
+    assert not c_next.startswith("[")
+
+    # 3. SearchSession Reset Filters: purges all active and explicit filters cleanly
+    sess = SearchSession("chat-test-reset", "States 1080p Hindi", 100, 200)
+    sess.current_offset = 10
+    assert sess.search_request.quality == "1080p"
+    assert sess.search_request.language == "hindi"
+    sess.set_filter("season", "2")
+    assert sess.active_filters["season"] == "2"
+    assert sess.current_offset == 0
+
+    # User clicks Reset Filters
+    sess.reset_filters()
+    assert sess.active_filters == {}
+    assert sess.snapshot_candidates == []
+    assert sess.current_offset == 0
+    assert sess.search_request.quality is None
+    assert sess.search_request.language is None
+    assert sess.search_request.season is None
+    assert sess.search_request.explicit_filters == {}
+
+    # 4. SearchSession offset persistence for submenus
+    sess.current_offset = 10
+    assert sess.current_offset == 10
+    # Opening a filter submenu and clicking "Back to Files" preserves current_offset
+    target_offset = getattr(sess, "current_offset", 0)
+    assert target_offset == 10
+    btns_restored = build_search_buttons(
+        files=dummy_files,
+        key="test-key",
+        current_offset=target_offset,
+        total_results=25,
+        req=123,
+        settings={"button": True}
+    )
+    # The last row should be the pagination row with [ ⋞ ʙᴀᴄᴋ ] and [ ɴᴇxᴛ ⋟ ]
+    pag_row = btns_restored[-1]
+    assert pag_row[0].text == "⋞ ʙᴀᴄᴋ"
+    assert pag_row[1].text == "2 / 3"
+    assert pag_row[2].text == "ɴᴇxᴛ ⋟"
+
+    # 5. None file_name fallback to caption (No "None" buttons)
+    file_with_none = MockMedia("none_id", "None", 1000000000, caption="<b>Succession.S04E04.mkv</b>")
+    label = format_button_label(file_with_none.file_name if file_with_none.file_name != "None" else "Succession.S04E04.mkv", file_with_none.file_size)
+    assert "None" not in label
+    assert "Succession.S04E04.mkv" in label
+    assert pag_row[2].text == "ɴᴇxᴛ ⋟"
+

@@ -100,10 +100,15 @@ def get_fts_connection():
                 key TEXT PRIMARY KEY,
                 fresh_query TEXT,
                 buttons_query TEXT,
+                active_filters TEXT,
                 file_ids TEXT,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
+        try:
+            _fts_conn.execute("ALTER TABLE filter_cache ADD COLUMN active_filters TEXT")
+        except Exception:
+            pass
         _fts_conn.commit()
     return _fts_conn
 
@@ -559,7 +564,7 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
         parsed = parse_user_query(base_search)
 
     # 1. Fast Path: If session already has a stable ranked snapshot for this exact filter state, serve from snapshot
-    if session and session.snapshot_candidates and offset > 0:
+    if session and session.snapshot_candidates:
         ranked_candidates = session.snapshot_candidates
         ranked_snapshot_count = session.ranked_snapshot_count or len(ranked_candidates)
         files = ranked_candidates[offset:offset + max_results]
@@ -642,7 +647,7 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
     next_offset = str(offset + len(files)) if (offset + len(files) < ranked_snapshot_count) else ""
 
     # Populate cache for current and subsequent pages of this snapshot
-    GLOBAL_SEARCH_CACHE.set(cache_key, files, ranked_snapshot_count)
+    GLOBAL_SEARCH_CACHE.set(cache_key, files, next_offset, ranked_snapshot_count)
     if ranked_snapshot_count > max_results:
         for p_off in range(max_results, min(ranked_snapshot_count, max_results * 5), max_results):
             sub_key = GLOBAL_SEARCH_CACHE.make_key(
@@ -661,7 +666,8 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
                 sort_version=parsed.sort_version,
             )
             sub_slice = ranked_candidates[p_off:p_off + max_results]
-            GLOBAL_SEARCH_CACHE.set(sub_key, sub_slice, ranked_snapshot_count)
+            sub_next = str(p_off + len(sub_slice)) if (p_off + len(sub_slice) < ranked_snapshot_count) else ""
+            GLOBAL_SEARCH_CACHE.set(sub_key, sub_slice, sub_next, ranked_snapshot_count)
 
     duration_ms = (time.time() - t_start) * 1000
     GLOBAL_SEARCH_ANALYTICS.record_search(base_search, ranked_snapshot_count, duration_ms, f_dict)

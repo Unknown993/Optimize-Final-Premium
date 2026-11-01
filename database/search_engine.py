@@ -754,27 +754,39 @@ class SearchCache:
         entry = self._cache.get(key)
         if not entry:
             return None
-        ts, files, total = entry
+        
+        if len(entry) == 4:
+            ts, files, next_offset, total = entry
+        else:
+            ts, files, total = entry
+            next_offset = ""
+            
         if time.time() - ts > self.ttl:
             self._cache.pop(key, None)
             return None
-        return files, str(entry[1]) if total else "", total
+        return files, str(next_offset) if next_offset else "", int(total)
 
     def set(self, *args, **kwargs):
-        if len(args) == 3 and isinstance(args[0], str):
+        next_offset = ""
+        if len(args) == 4 and isinstance(args[0], str):
+            key, files, next_offset, total = args
+        elif len(args) == 3 and isinstance(args[0], str):
             key, files, total = args
         elif len(args) >= 6:
             query_norm, filters, offset, max_results, files, total = args[:6]
             key = self.make_key(query_norm, filters, offset, max_results)
+            if len(args) >= 7:
+                next_offset = args[6]
         else:
             key = kwargs.get("cache_key", "")
             files = kwargs.get("files", [])
+            next_offset = kwargs.get("next_offset", "")
             total = kwargs.get("total", 0)
 
         if len(self._cache) >= self.max_entries:
             oldest_key = min(self._cache.keys(), key=lambda k: self._cache[k][0])
             self._cache.pop(oldest_key, None)
-        self._cache[key] = (time.time(), files, total)
+        self._cache[key] = (time.time(), files, str(next_offset) if next_offset else "", int(total))
 
     def clear(self):
         self._cache.clear()
@@ -859,6 +871,7 @@ class SearchSession:
         if self.search_request.episode is not None:
             self.active_filters["episode"] = str(self.search_request.episode)
 
+        self.current_offset: int = 0
         self.revision = 0
         self.created_at = time.time()
         self.updated_at = time.time()
@@ -879,6 +892,7 @@ class SearchSession:
         self.increment_revision()
         # Invalidate snapshot when active filters change
         self.snapshot_candidates.clear()
+        self.current_offset = 0
         if value is None or value == "homepage":
             self.active_filters.pop(filter_type, None)
         else:
@@ -895,6 +909,14 @@ class SearchSession:
         self.increment_revision()
         self.active_filters.clear()
         self.snapshot_candidates.clear()
+        self.current_offset = 0
+        if self.search_request:
+            self.search_request.quality = None
+            self.search_request.language = None
+            self.search_request.season = None
+            self.search_request.episode = None
+            self.search_request.universal_audio = False
+            self.search_request.explicit_filters.clear()
 
     def get_query_input(self) -> Dict[str, Any]:
         """Construct multi-filter dictionary input for MongoDB search."""
@@ -1099,18 +1121,79 @@ def format_button_label(file_name: str, file_size: int, max_len: int = 58) -> st
     return f"{prefix} {fn}".strip()
 
 
+def build_pagination_row(
+    key: str,
+    req: Any,
+    current_offset: int,
+    total_results: int,
+    page_size: int = 10,
+    button_cls=None
+) -> List[Any]:
+    """
+    Build unified, dynamic, bi-directional pagination button row.
+    Guarantees:
+    - If total_results <= page_size: shows single '↭ ɴᴏ ᴍᴏʀᴇ ᴘᴀɢᴇꜱ ᴀᴠᴀɪʟᴀʙʟᴇ ↭' button.
+    - If page_no == 1 and total_pages > 1: [ ᴘᴀɢᴇ ] [ 1 / {total_pages} ] [ ɴᴇxᴛ ⋟ ]
+    - If page_no > 1 and page_no < total_pages: [ ⋞ ʙᴀᴄᴋ ] [ {page_no} / {total_pages} ] [ ɴᴇxᴛ ⋟ ]
+    - If page_no == total_pages and total_pages > 1: [ ⋞ ʙᴀᴄᴋ ] [ {total_pages} / {total_pages} ]
+    - Next and Back buttons NEVER disappear when clicking back or forward.
+    """
+    if button_cls is None:
+        import os
+        if str(os.environ.get("TEST_MODE", "")).lower() in ("1", "true", "yes"):
+            button_cls = SearchButton
+        else:
+            try:
+                from pyrogram.types import InlineKeyboardButton
+                button_cls = InlineKeyboardButton
+            except Exception:
+                button_cls = SearchButton
+
+    page_size = max(1, int(page_size or 10))
+    current_offset = max(0, int(current_offset or 0))
+    total = max(0, int(total_results or 0))
+    total_pages = math.ceil(total / page_size) if total > 0 else 1
+    page_no = (current_offset // page_size) + 1
+
+    if total_pages <= 1:
+        return [
+            button_cls(text="↭ ɴᴏ ᴍᴏʀᴇ ᴘᴀɢᴇꜱ ᴀᴠᴀɪʟᴀʙʟᴇ ↭", callback_data=validate_callback_data("pages"))
+        ]
+
+    row = []
+    # 1. Back button or Page label
+    if page_no > 1:
+        prev_offset = max(0, current_offset - page_size)
+        row.append(button_cls(text="⋞ ʙᴀᴄᴋ", callback_data=validate_callback_data(f"next_{req}_{key}_{prev_offset}")))
+    else:
+        row.append(button_cls(text="ᴘᴀɢᴇ", callback_data=validate_callback_data("pages")))
+
+    # 2. Page indicator
+    row.append(button_cls(text=f"{page_no} / {total_pages}", callback_data=validate_callback_data("pages")))
+
+    # 3. Next button if more pages exist
+    if page_no < total_pages:
+        next_offset = current_offset + page_size
+        row.append(button_cls(text="ɴᴇxᴛ ⋟", callback_data=validate_callback_data(f"next_{req}_{key}_{next_offset}")))
+
+    return row
+
+
 def build_search_buttons(
     files: List[Any],
     key: str,
-    offset: Any,
-    total_results: int,
-    req: Any,
-    settings: dict,
+    offset: Any = 0,
+    total_results: int = 0,
+    req: Any = 0,
+    settings: Optional[dict] = None,
     active_filter: Optional[str] = None,
     button_cls=None,
-    bot_username: str = "bot"
+    bot_username: str = "bot",
+    current_offset: Optional[int] = None,
 ) -> List[List[Any]]:
     """Build uniform search results with active filter chips & persistent filter controls."""
+    if settings is None:
+        settings = {}
     if button_cls is None:
         import os
         if str(os.environ.get("TEST_MODE", "")).lower() in ("1", "true", "yes"):
@@ -1143,17 +1226,35 @@ def build_search_buttons(
             label = format_button_label(get_display_name(file), getattr(file, "file_size", 0))
             btn.append([button_cls(text=f"🔗 {label}", callback_data=validate_callback_data(f"file#{file.file_id}"))])
 
-    offset_str = str(offset) if offset not in (None, "") else ""
-    if offset_str != "":
-        max_btn_val = 10 if settings.get("max_btn") else 10
-        page_total = math.ceil(int(total_results) / max_btn_val) if total_results else 1
-        btn.append([
-            button_cls("ᴘᴀɢᴇ", callback_data=validate_callback_data("pages")),
-            button_cls(text=f"1/{page_total}", callback_data=validate_callback_data("pages")),
-            button_cls(text="ɴᴇxᴛ ⋟", callback_data=validate_callback_data(f"next_{req}_{key}_{offset_str}"))
-        ])
+    # Resolve page_size from settings
+    import os
+    env_max = os.environ.get("MAX_B_TN", "10")
+    try:
+        default_max = int(env_max)
+    except Exception:
+        default_max = 10
+    max_btn_val = 10 if settings.get("max_btn") else int(settings.get("max_btn_val") or default_max)
+
+    # Resolve current offset cleanly
+    if current_offset is not None:
+        c_off = int(current_offset)
     else:
-        btn.append([
-            button_cls(text="↭ ɴᴏ ᴍᴏʀᴇ ᴘᴀɢᴇꜱ ᴀᴠᴀɪʟᴀʙʟᴇ ↭", callback_data=validate_callback_data("pages"))
-        ])
+        try:
+            c_off = int(offset)
+            # If offset equals page_size and total_results > page_size, this was legacy next_offset for page 1
+            if c_off == max_btn_val and int(total_results) > max_btn_val:
+                c_off = 0
+        except (ValueError, TypeError):
+            c_off = 0
+
+    pagination_row = build_pagination_row(
+        key=key,
+        req=req,
+        current_offset=c_off,
+        total_results=total_results,
+        page_size=max_btn_val,
+        button_cls=button_cls
+    )
+    if pagination_row:
+        btn.append(pagination_row)
     return btn

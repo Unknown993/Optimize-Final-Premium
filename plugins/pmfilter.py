@@ -36,6 +36,8 @@ from database.search_engine import (
     LANGUAGE_MAP,
     QUALITY_MAP,
     UNIVERSAL_AUDIO_TAGS,
+    build_pagination_row,
+    format_button_label,
 )
 
 class PersistentDict(dict):
@@ -162,7 +164,7 @@ ACTIVE_FILTERS = {}
 def get_active_filters(key: str) -> dict:
     if key in ACTIVE_FILTERS:
         return ACTIVE_FILTERS[key]
-    val = cache_get_field(str(key), "buttons_query")
+    val = cache_get_field(str(key), "active_filters")
     if val and val.startswith("{") and val.endswith("}"):
         try:
             d = json.loads(val)
@@ -184,7 +186,7 @@ def set_active_filter(key: str, filter_type: str, value: str):
         else:
             f[filter_type] = value
     ACTIVE_FILTERS[key] = f
-    cache_set_field(str(key), "buttons_query", json.dumps(f))
+    cache_set_field(str(key), "active_filters", json.dumps(f))
     sess = GLOBAL_SESSION_MANAGER.get(key)
     if sess:
         sess.set_filter(filter_type, value)
@@ -192,7 +194,7 @@ def set_active_filter(key: str, filter_type: str, value: str):
 
 def clear_active_filters(key: str):
     ACTIVE_FILTERS.pop(key, None)
-    cache_set_field(str(key), "buttons_query", "{}")
+    cache_set_field(str(key), "active_filters", "{}")
     sess = GLOBAL_SESSION_MANAGER.get(key)
     if sess:
         sess.reset_filters()
@@ -254,40 +256,21 @@ def build_combined_filter_queries(base_search: str, filters_dict: dict):
         queries.append(" ".join(tokens))
     return queries
 
-def build_search_buttons(files, key, offset, total_results, req, settings, active_filter=None):
-    """Build uniform search results with active filter chips & informative labels."""
-    btn = []
-    if active_filter:
-        btn.append([
-            InlineKeyboardButton(f"🎯 Filter: {active_filter}", callback_data=f"filter_info#{active_filter}"),
-            InlineKeyboardButton("🔄 Reset Filters", callback_data=f"reset_filter#{key}")
-        ])
-    btn.append([
-        InlineKeyboardButton("ʀᴇᴍᴏᴠᴇ ᴀᴅs", url=f"https://t.me/{temp.U_NAME}?start=premium"),
-        InlineKeyboardButton("Sᴇɴᴅ Aʟʟ", callback_data=f"sendfiles#{key}")
-    ])
-    btn.append([
-        InlineKeyboardButton("Qᴜᴀʟɪᴛʏ", callback_data=f"qualities#{key}"),
-        InlineKeyboardButton("Lᴀɴɢᴜᴀɢᴇ", callback_data=f"languages#{key}"),
-        InlineKeyboardButton("Sᴇᴀsᴏɴ",  callback_data=f"seasons#{key}")
-    ])
-    if settings.get("button", True):
-        for file in files:
-            label = format_button_label(get_display_name(file), file.file_size)
-            btn.append([InlineKeyboardButton(text=f"🔗 {label}", callback_data=f"file#{file.file_id}")])
-    if offset != "":
-        max_btn_val = 10 if settings.get("max_btn") else int(MAX_B_TN)
-        page_total = math.ceil(int(total_results) / max_btn_val)
-        btn.append([
-            InlineKeyboardButton("ᴘᴀɢᴇ", callback_data="pages"),
-            InlineKeyboardButton(text=f"1/{page_total}", callback_data="pages"),
-            InlineKeyboardButton(text="ɴᴇxᴛ ⋟", callback_data=f"next_{req}_{key}_{offset}")
-        ])
-    else:
-        btn.append([
-            InlineKeyboardButton(text="↭ ɴᴏ ᴍᴏʀᴇ ᴘᴀɢᴇꜱ ᴀᴠᴀɪʟᴀʙʟᴇ ↭", callback_data="pages")
-        ])
-    return btn
+def build_search_buttons(files, key, offset=0, total_results=0, req=0, settings=None, active_filter=None, current_offset=None):
+    """Build uniform search results using unified engine button builder."""
+    from database.search_engine import build_search_buttons as _engine_build
+    return _engine_build(
+        files=files,
+        key=key,
+        offset=offset,
+        total_results=total_results,
+        req=req,
+        settings=settings or {},
+        active_filter=active_filter,
+        button_cls=InlineKeyboardButton,
+        bot_username=temp.U_NAME or "bot",
+        current_offset=current_offset
+    )
 
 BUTTON = {}
 BUTTONS = PersistentDict("buttons_query")
@@ -413,8 +396,6 @@ async def refercall(bot, query):
 async def next_page(bot, query):
     ident, req, key, offset = query.data.split("_")
     curr_time = datetime.now(pytz.timezone('Asia/Kolkata')).time()
-    # Multi-user pagination
-    pass
     try:
         offset = int(offset)
     except:
@@ -439,73 +420,27 @@ async def next_page(bot, query):
     if sess and sess.revision != current_rev:
         logger.info("Dropping stale next_page callback (rev %s vs %s)", current_rev, sess.revision)
         return await query.answer()
-    try:
-        n_offset = int(n_offset)
-    except:
-        n_offset = 0
 
     if not files:
-        return
+        return await query.answer()
+
+    if sess:
+        sess.current_offset = offset
+
     temp.GETALL[key] = files
     cache_save_getall(key, [f.file_id for f in files])
     temp.SHORT[query.from_user.id] = query.message.chat.id
     settings = await get_settings(query.message.chat.id)
-    max_btn_val = 10 if settings.get("max_btn") else int(MAX_B_TN)
 
-    btn = []
-    if active_chip:
-        btn.append([
-            InlineKeyboardButton(f"🎯 Filter: {active_chip}", callback_data=f"filter_info#{active_chip}"),
-            InlineKeyboardButton("🔄 Reset Filters", callback_data=f"reset_filter#{key}")
-        ])
-    btn.append([
-        InlineKeyboardButton("ʀᴇᴍᴏᴠᴇ ᴀᴅs", url=f"https://t.me/{temp.U_NAME}?start=premium"),
-        InlineKeyboardButton("Sᴇɴᴅ Aʟʟ", callback_data=f"sendfiles#{key}")
-    ])
-    btn.append([
-        InlineKeyboardButton("Qᴜᴀʟɪᴛʏ", callback_data=f"qualities#{key}"),
-        InlineKeyboardButton("Lᴀɴɢᴜᴀɢᴇ", callback_data=f"languages#{key}"),
-        InlineKeyboardButton("Sᴇᴀsᴏɴ",  callback_data=f"seasons#{key}")
-    ])
-
-    if settings.get("button", True):
-        for file in files:
-            btn.append([
-                InlineKeyboardButton(text=f"🔗 {format_button_label(get_display_name(file), file.file_size)}", callback_data=f"file#{file.file_id}")
-            ])
-
-    # Dynamic pagination controls preserving filter & query context
-    page_no = math.ceil(int(offset) / max_btn_val) + 1
-    total_pages = math.ceil(int(total) / max_btn_val)
-    if 0 < offset <= max_btn_val:
-        off_set = 0
-    elif offset == 0:
-        off_set = None
-    else:
-        off_set = offset - max_btn_val
-
-    if n_offset == 0:
-        if off_set is not None:
-            btn.append([
-                InlineKeyboardButton("⋞ ʙᴀᴄᴋ", callback_data=f"next_{req}_{key}_{off_set}"),
-                InlineKeyboardButton(f"{page_no} / {total_pages}", callback_data="pages")
-            ])
-        else:
-            btn.append([
-                InlineKeyboardButton(f"{page_no} / {total_pages}", callback_data="pages")
-            ])
-    elif off_set is None:
-        btn.append([
-            InlineKeyboardButton("ᴘᴀɢᴇ", callback_data="pages"),
-            InlineKeyboardButton(f"{page_no} / {total_pages}", callback_data="pages"),
-            InlineKeyboardButton("ɴᴇxᴛ ⋟", callback_data=f"next_{req}_{key}_{n_offset}")
-        ])
-    else:
-        btn.append([
-            InlineKeyboardButton("⋞ ʙᴀᴄᴋ", callback_data=f"next_{req}_{key}_{off_set}"),
-            InlineKeyboardButton(f"{page_no} / {total_pages}", callback_data="pages"),
-            InlineKeyboardButton("ɴᴇxᴛ ⋟", callback_data=f"next_{req}_{key}_{n_offset}")
-        ])
+    btn = build_search_buttons(
+        files=files,
+        key=key,
+        current_offset=offset,
+        total_results=total,
+        req=req,
+        settings=settings,
+        active_filter=active_chip
+    )
 
     search_title = raw_search or (search_input.get("search", "") if isinstance(search_input, dict) else str(search_input or ""))
     dreamx_title = clean_search_text(search_title)
@@ -516,10 +451,7 @@ async def next_page(bot, query):
             timedelta(hours=curr_time.hour, minutes=curr_time.minute, seconds=(curr_time.second+(curr_time.microsecond/1000000)))
         remaining_seconds = "{:.2f}".format(time_difference.total_seconds())
         try:
-            if settings.get("imdb"):
-                cap = await get_cap(settings, remaining_seconds, files, query, total, dreamx_title, offset)
-            else:
-                cap = await get_cap(settings, remaining_seconds, files, query, total, dreamx_title, offset + 1)
+            cap = await get_cap(settings, remaining_seconds, files, query, total, dreamx_title, offset=offset)
             await edit_search_message(query, cap, InlineKeyboardMarkup(btn))
         except Exception as e:
             logger.exception("Failed to send result: %s", e)
@@ -673,7 +605,7 @@ async def filter_qualities_cb_handler(client: Client, query: CallbackQuery):
     temp.GETALL[key] = files
     cache_save_getall(key, [f.file_id for f in files])
     settings = await get_settings(message.chat.id)
-    btn = build_search_buttons(files, key, offset, total_results, req, settings, active_filter=active_chip)
+    btn = build_search_buttons(files, key, current_offset=0, total_results=total_results, req=req, settings=settings, active_filter=active_chip)
 
     if not settings.get("button"):
         cur_time = datetime.now(pytz.timezone('Asia/Kolkata')).time()
@@ -755,7 +687,7 @@ async def filter_languages_cb_handler(client: Client, query: CallbackQuery):
     temp.GETALL[key] = files
     cache_save_getall(key, [f.file_id for f in files])
     settings = await get_settings(message.chat.id)
-    btn = build_search_buttons(files, key, offset, total_results, req, settings, active_filter=active_chip)
+    btn = build_search_buttons(files, key, current_offset=0, total_results=total_results, req=req, settings=settings, active_filter=active_chip)
 
     if not settings.get("button"):
         cur_time = datetime.now(pytz.timezone('Asia/Kolkata')).time()
@@ -839,7 +771,7 @@ async def filter_seasons_cb_handler(client: Client, query: CallbackQuery):
     temp.GETALL[key] = files
     cache_save_getall(key, [f.file_id for f in files])
     settings = await get_settings(chat_id)
-    btn = build_search_buttons(files, key, offset, total_results, req, settings, active_filter=active_chip)
+    btn = build_search_buttons(files, key, current_offset=0, total_results=total_results, req=req, settings=settings, active_filter=active_chip)
 
     if not settings.get("button"):
         cur_time = datetime.now(pytz.timezone('Asia/Kolkata')).time()
@@ -869,20 +801,26 @@ async def back_filter_cb_handler(client: Client, query: CallbackQuery):
     chat_id = query.message.chat.id
     req = query.from_user.id
     sess = GLOBAL_SESSION_MANAGER.get(key)
+    target_offset = getattr(sess, "current_offset", 0) if sess else 0
     current_rev = sess.increment_revision() if sess else 0
-    files, offset, total_results = await get_search_results(chat_id, query_input, offset=0, filter=True, session=sess)
+    files, n_offset, total_results = await get_search_results(chat_id, query_input, offset=target_offset, filter=True, session=sess)
     if sess and sess.revision != current_rev:
-        logger.info("Dropping stale filter_qualities callback (rev %s vs %s)", current_rev, sess.revision)
+        logger.info("Dropping stale back_filter callback (rev %s vs %s)", current_rev, sess.revision)
         return await query.answer()
+    if not files and target_offset > 0:
+        target_offset = 0
+        if sess:
+            sess.current_offset = 0
+        files, n_offset, total_results = await get_search_results(chat_id, query_input, offset=0, filter=True, session=sess)
     if not files:
         return await query.answer("🚫 ɴᴏ ꜰɪʟᴇꜱ ᴡᴇʀᴇ ꜰᴏᴜɴᴅ 🚫", show_alert=1)
     temp.GETALL[key] = files
     cache_save_getall(key, [f.file_id for f in files])
     settings = await get_settings(chat_id)
-    btn = build_search_buttons(files, key, offset, total_results, req, settings, active_filter=active_chip)
+    btn = build_search_buttons(files, key, current_offset=target_offset, total_results=total_results, req=req, settings=settings, active_filter=active_chip)
     if not settings.get("button"):
         dreamx_title = clean_search_text(search)
-        cap = await get_cap(settings, "0.10", files, query, total_results, dreamx_title, offset=0)
+        cap = await get_cap(settings, "0.10", files, query, total_results, dreamx_title, offset=target_offset)
         await edit_search_message(query, cap, InlineKeyboardMarkup(btn))
     else:
         try:
@@ -894,17 +832,25 @@ async def back_filter_cb_handler(client: Client, query: CallbackQuery):
 @Client.on_callback_query(filters.regex(r"^reset_filter#"))
 async def reset_filter_cb_handler(client: Client, query: CallbackQuery):
     _, key = query.data.split("#")
-    search = get_search_query_for_key(key, query)
+    sess = GLOBAL_SESSION_MANAGER.get(key)
+    if sess and sess.search_request and sess.search_request.normalized_title:
+        search = sess.search_request.normalized_title
+    else:
+        search = get_search_query_for_key(key, query)
+        search = clean_search_text(search) if search else ""
     if not search:
         return await query.answer("Search expired! Please search again.", show_alert=True)
-    search = search.replace("_", " ")
+    search = search.replace("_", " ").strip()
+    if sess:
+        sess.reset_filters()
+        sess.current_offset = 0
     clear_active_filters(key)
+    FRESH[key] = search
     BUTTONS[key] = search
     chat_id = query.message.chat.id
     req = query.from_user.id
-    sess = GLOBAL_SESSION_MANAGER.get(key)
     current_rev = sess.increment_revision() if sess else 0
-    files, offset, total_results = await get_search_results(chat_id, search, offset=0, filter=True, session=sess)
+    files, n_offset, total_results = await get_search_results(chat_id, search, offset=0, filter=True, session=sess)
     if sess and sess.revision != current_rev:
         logger.info("Dropping stale reset_filter callback (rev %s vs %s)", current_rev, sess.revision)
         return await query.answer()
@@ -913,7 +859,7 @@ async def reset_filter_cb_handler(client: Client, query: CallbackQuery):
     temp.GETALL[key] = files
     cache_save_getall(key, [f.file_id for f in files])
     settings = await get_settings(chat_id)
-    btn = build_search_buttons(files, key, offset, total_results, req, settings, active_filter=None)
+    btn = build_search_buttons(files, key, current_offset=0, total_results=total_results, req=req, settings=settings, active_filter=None)
     if not settings.get("button"):
         dreamx_title = clean_search_text(search)
         cap = await get_cap(settings, "0.10", files, query, total_results, dreamx_title, offset=0)
@@ -1958,7 +1904,7 @@ async def auto_filter(client, msg, spoll=False):
 
         active_chip = sess.get_filter_chip() if 'sess' in locals() and sess else get_filter_chip_label(get_active_filters(key))
         req = message.from_user.id if message.from_user else 0
-        btn = build_search_buttons(files, key, offset, total_results, req, settings, active_filter=active_chip)
+        btn = build_search_buttons(files, key, current_offset=0, total_results=total_results, req=req, settings=settings, active_filter=active_chip)
 
         if settings.get('imdb'):
             imdb = await get_posterx(search, file=(files[0]).file_name) if TMDB_POSTERS else await get_poster(search, file=(files[0]).file_name)
