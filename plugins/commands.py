@@ -1452,43 +1452,69 @@ async def reset_trial(client, message):
 
 @Client.on_message(filters.command("search_debug") & filters.user(ADMINS))
 async def search_debug_cmd(client: Client, message: Message):
+    import html
     if len(message.command) < 2:
         return await message.reply_text("<b>Usage:</b> <code>/search_debug &lt;query&gt;</code>")
     raw_query = message.text.split(None, 1)[1].strip()
     
     t0 = time.time()
-    from database.search_engine import parse_user_query, calculate_relevance_score, build_mongo_search_query, GLOBAL_SEARCH_ANALYTICS
+    from database.search_engine import (
+        parse_user_query,
+        calculate_relevance_score,
+        get_relevance_score_breakdown,
+        build_mongo_search_query,
+        GLOBAL_SEARCH_ANALYTICS,
+        GLOBAL_SESSION_MANAGER,
+    )
     from database.ia_filterdb import get_search_results
     
+    t_parse_0 = time.time()
     parsed = parse_user_query(raw_query)
+    parse_ms = (time.time() - t_parse_0) * 1000
+
     chat_id = message.chat.id
-    files, next_offset, total_results = await get_search_results(chat_id, raw_query, offset=0, filter=True)
+    sess = GLOBAL_SESSION_MANAGER.get_or_create(f"debug_{chat_id}_{message.id}", raw_query, chat_id, message.from_user.id if message.from_user else 0)
+
+    t_db_0 = time.time()
+    files, next_offset, total_results = await get_search_results(chat_id, raw_query, offset=0, filter=True, session=sess)
+    db_ms = (time.time() - t_db_0) * 1000
     latency_ms = (time.time() - t0) * 1000
 
     breakdown_lines = []
     for idx, f in enumerate(files[:3], start=1):
         fn = getattr(f, "file_name", "Unknown")
-        sc = calculate_relevance_score(fn, parsed)
+        breakdown = get_relevance_score_breakdown(fn, parsed)
         sz = get_size(getattr(f, "file_size", 0))
-        breakdown_lines.append(f"  {idx}. <code>{fn}</code>\n     • Score: <b>{sc}</b> | Size: <b>{sz}</b>")
+        safe_fn = html.escape(str(fn))
+        tier = breakdown.get("tier", "N/A")
+        score = breakdown.get("total", 0)
+        breakdown_lines.append(f"  {idx}. <code>{safe_fn}</code>\n     • <b>{tier}</b> | Score: <b>{score}</b> | Size: <b>{sz}</b>")
     
     top_files_str = "\n".join(breakdown_lines) if breakdown_lines else "  <i>No files matched query.</i>"
     
+    scope_str = getattr(sess, "result_scope", "complete")
+    cand_count = getattr(sess, "candidate_documents_examined", len(files))
+    tot_matched = getattr(sess, "total_matched_documents", total_results)
+
+    safe_raw = html.escape(raw_query)
+    safe_title = html.escape(str(parsed.get('title') or ''))
+
     text = (
-        f"🔍 <b>SEARCH DIAGNOSTICS REPORT</b>\n"
+        f"🔍 <b>SEARCH DIAGNOSTICS REPORT (V9)</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"<b>Raw Query:</b> <code>{raw_query}</code>\n"
-        f"<b>Parsed Title:</b> <code>{parsed.get('title')}</code>\n"
+        f"<b>Raw Query:</b> <code>{safe_raw}</code>\n"
+        f"<b>Parsed Title:</b> <code>{safe_title}</code>\n"
         f"<b>Parsed Year:</b> <code>{parsed.get('year') or 'N/A'}</code>\n"
         f"<b>Parsed Language:</b> <code>{parsed.get('language') or 'N/A'}</code>\n"
         f"<b>Parsed Quality:</b> <code>{parsed.get('quality') or 'N/A'}</code>\n"
         f"<b>Parsed Season:</b> <code>{parsed.get('season') or 'N/A'}</code>\n"
+        f"<b>Parsed Episode:</b> <code>{parsed.get('episode') or 'N/A'}</code>\n"
         f"<b>Universal Audio:</b> <code>{parsed.get('universal_audio')}</code>\n"
         f"──────────────────────\n"
-        f"<b>Search Engine:</b> <code>MongoDB token boundary regex</code>\n"
-        f"<b>Execution Latency:</b> <code>{latency_ms:.2f} ms</code>\n"
-        f"<b>Total Matched:</b> <code>{total_results} documents</code>\n"
-        f"<b>Page 1 Returned:</b> <code>{len(files)} items</code>\n"
+        f"<b>Engine:</b> <code>MongoDB token boundary regex ($and)</code>\n"
+        f"<b>Total Execution:</b> <code>{latency_ms:.2f} ms</code> (Parse: {parse_ms:.2f}ms, DB/Rank: {db_ms:.2f}ms)\n"
+        f"<b>DB Matches:</b> <code>{tot_matched}</code> | <b>Examined:</b> <code>{cand_count}</code>\n"
+        f"<b>Ranked Snapshot:</b> <code>{total_results}</code> (Scope: <i>{scope_str}</i>)\n"
         f"──────────────────────\n"
         f"<b>Top Candidates & Relevance Breakdown:</b>\n"
         f"{top_files_str}\n"

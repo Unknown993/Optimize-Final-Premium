@@ -98,16 +98,24 @@ def test_03_tamil_and_all_languages_parity():
 
 
 def test_04_universal_tag_only():
-    """Test 4: Universal tags alone appear under every language filter."""
-    files = [
+    """Test 4: Universal audio tags appear under every language filter; generic dub/sub do not."""
+    universal_files = [
         "Avatar.2009.1080p.Dual.Audio.mkv",
         "Avatar.2009.720p.Multi.Audio.mkv",
+        "Avatar.2009.Dual.mkv",
+        "Avatar.2009.Multiaudio.mkv",
+    ]
+    excluded_files = [
         "Avatar.2009.1080p.Dubbed.mkv",
+        "Avatar.2009.Dub.mkv",
+        "Avatar.2009.Multi-Sub.mkv",
     ]
     for lang in ["hindi", "tamil", "telugu", "malayalam", "kannada", "english"]:
         reg = build_language_regex(lang)
-        for fn in files:
+        for fn in universal_files:
             assert bool(reg.search(fn)) is True, f"{fn} did not match language filter {lang}"
+        for fn in excluded_files:
+            assert bool(reg.search(fn)) is False, f"{fn} unexpectedly matched language filter {lang}"
 
 
 def test_05_no_and_error():

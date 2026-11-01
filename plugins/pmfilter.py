@@ -433,7 +433,12 @@ async def next_page(bot, query):
     if not search_input:
         await query.answer(script.OLD_ALRT_TXT.format(query.from_user.first_name), show_alert=True)
         return
-    files, n_offset, total = await get_search_results(query.message.chat.id, search_input, offset=offset, filter=True)
+    sess = GLOBAL_SESSION_MANAGER.get(key)
+    current_rev = sess.increment_revision() if sess else 0
+    files, n_offset, total = await get_search_results(query.message.chat.id, search_input, offset=offset, filter=True, session=sess)
+    if sess and sess.revision != current_rev:
+        logger.info("Dropping stale next_page callback (rev %s vs %s)", current_rev, sess.revision)
+        return await query.answer()
     try:
         n_offset = int(n_offset)
     except:
@@ -652,7 +657,12 @@ async def filter_qualities_cb_handler(client: Client, query: CallbackQuery):
     active_chip = get_filter_chip_label(active_filters)
     query_input = {"search": search, **active_filters}
 
-    files, offset, total_results = await get_search_results(chat_id, query_input, offset=0, filter=True)
+    sess = GLOBAL_SESSION_MANAGER.get(key)
+    current_rev = sess.increment_revision() if sess else 0
+    files, offset, total_results = await get_search_results(chat_id, query_input, offset=0, filter=True, session=sess)
+    if sess and sess.revision != current_rev:
+        logger.info("Dropping stale filter_qualities callback (rev %s vs %s)", current_rev, sess.revision)
+        return await query.answer()
     if not files:
         dreamx_title = clean_search_text(search)
         btn = build_empty_filter_buttons(key, active_filter=active_chip)
@@ -729,7 +739,12 @@ async def filter_languages_cb_handler(client: Client, query: CallbackQuery):
     active_chip = get_filter_chip_label(active_filters)
     query_input = {"search": search, **active_filters}
 
-    files, offset, total_results = await get_search_results(chat_id, query_input, offset=0, filter=True)
+    sess = GLOBAL_SESSION_MANAGER.get(key)
+    current_rev = sess.increment_revision() if sess else 0
+    files, offset, total_results = await get_search_results(chat_id, query_input, offset=0, filter=True, session=sess)
+    if sess and sess.revision != current_rev:
+        logger.info("Dropping stale filter_qualities callback (rev %s vs %s)", current_rev, sess.revision)
+        return await query.answer()
     if not files:
         dreamx_title = clean_search_text(search)
         btn = build_empty_filter_buttons(key, active_filter=active_chip)
@@ -808,7 +823,12 @@ async def filter_seasons_cb_handler(client: Client, query: CallbackQuery):
     active_chip = get_filter_chip_label(active_filters)
     query_input = {"search": search, **active_filters}
 
-    files, offset, total_results = await get_search_results(chat_id, query_input, offset=0, filter=True)
+    sess = GLOBAL_SESSION_MANAGER.get(key)
+    current_rev = sess.increment_revision() if sess else 0
+    files, offset, total_results = await get_search_results(chat_id, query_input, offset=0, filter=True, session=sess)
+    if sess and sess.revision != current_rev:
+        logger.info("Dropping stale filter_qualities callback (rev %s vs %s)", current_rev, sess.revision)
+        return await query.answer()
     if not files:
         dreamx_title = clean_search_text(search)
         btn = build_empty_filter_buttons(key, active_filter=active_chip)
@@ -848,7 +868,12 @@ async def back_filter_cb_handler(client: Client, query: CallbackQuery):
     query_input = {"search": search, **active_filters} if active_filters else search
     chat_id = query.message.chat.id
     req = query.from_user.id
-    files, offset, total_results = await get_search_results(chat_id, query_input, offset=0, filter=True)
+    sess = GLOBAL_SESSION_MANAGER.get(key)
+    current_rev = sess.increment_revision() if sess else 0
+    files, offset, total_results = await get_search_results(chat_id, query_input, offset=0, filter=True, session=sess)
+    if sess and sess.revision != current_rev:
+        logger.info("Dropping stale filter_qualities callback (rev %s vs %s)", current_rev, sess.revision)
+        return await query.answer()
     if not files:
         return await query.answer("🚫 ɴᴏ ꜰɪʟᴇꜱ ᴡᴇʀᴇ ꜰᴏᴜɴᴅ 🚫", show_alert=1)
     temp.GETALL[key] = files
@@ -877,7 +902,12 @@ async def reset_filter_cb_handler(client: Client, query: CallbackQuery):
     BUTTONS[key] = search
     chat_id = query.message.chat.id
     req = query.from_user.id
-    files, offset, total_results = await get_search_results(chat_id, search, offset=0, filter=True)
+    sess = GLOBAL_SESSION_MANAGER.get(key)
+    current_rev = sess.increment_revision() if sess else 0
+    files, offset, total_results = await get_search_results(chat_id, search, offset=0, filter=True, session=sess)
+    if sess and sess.revision != current_rev:
+        logger.info("Dropping stale reset_filter callback (rev %s vs %s)", current_rev, sess.revision)
+        return await query.answer()
     if not files:
         return await query.answer("🚫 ɴᴏ ꜰɪʟᴇꜱ ᴡᴇʀᴇ ꜰᴏᴜɴᴅ 🚫", show_alert=1)
     temp.GETALL[key] = files
@@ -1886,7 +1916,7 @@ async def auto_filter(client, msg, spoll=False):
 
                 query_input = sess.get_query_input() if sess.active_filters else search
 
-                files, offset, total_results = await get_search_results(message.chat.id, query_input, offset=0, filter=True)
+                files, offset, total_results = await get_search_results(message.chat.id, query_input, offset=0, filter=True, session=sess)
 
                 settings = await get_settings(message.chat.id)
                 if not files:

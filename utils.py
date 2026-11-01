@@ -217,12 +217,11 @@ async def add_name_to_db(filename):
     
     return await db.add_name(filename) 
 
-async def get_poster(query, bulk=False, id=False, file=None):
+def _fetch_imdb_sync(query, bulk=False, id=False, file=None):
     if not id:
         query = (query.strip()).lower()
         title = query
         year = re.findall(r'[1-2]\d{3}$', query, re.IGNORECASE)
-        imdb
         if year:
             year = list_to_str(year[:1])
             title = (query.replace(year, "")).strip()
@@ -307,6 +306,16 @@ async def get_poster(query, bulk=False, id=False, file=None):
         'rating': str(movie.get("rating")),
         'url':f'https://www.imdb.com/title/tt{movieid}'
     }
+
+async def get_poster(query, bulk=False, id=False, file=None):
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_fetch_imdb_sync, query, bulk, id, file),
+            timeout=3.0
+        )
+    except Exception as e:
+        logger.warning("get_poster async worker exception or timeout: %s", e)
+        return None
     
 async def get_posterx(query, bulk=False, id=False, file=None):
     """

@@ -1,27 +1,24 @@
-# 🚀 Optimize Final Premium – Telegram AutoFilter Bot (V2.0)
+# 🚀 Optimize Final Premium – Telegram AutoFilter Bot (V9.0)
 
 [![Python Version](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![Framework](https://img.shields.io/badge/Framework-Pyrogram-orange.svg)](https://docs.pyrogram.org/)
-[![Database](https://img.shields.io/badge/Database-MongoDB%20%2B%20SQLite%20FTS5-green.svg)](https://www.sqlite.org/fts5.html)
+[![Database](https://img.shields.io/badge/Database-MongoDB%20Atlas-green.svg)](https://www.mongodb.com/)
 [![License](https://img.shields.io/badge/License-MIT-purple.svg)](LICENSE)
 
-An ultra-optimized, enterprise-grade Telegram AutoFilter Bot engine powered by **Pyrogram**, **MongoDB**, and **SQLite FTS5 Trigram Tokenization**. Designed to eliminate slow full table scans, survive bot restarts without query loss, provide rich frontloaded button metadata, and deliver sub-3ms search latencies across millions of indexed media files.
+An enterprise-grade Telegram AutoFilter Bot engine powered by **Pyrogram**, **asyncio**, and **MongoDB with Token-Boundary Regex & Multi-Tier Deterministic Relevance Ranking**. Designed for high concurrency, out-of-order callback race protection, isolated multi-user session state, stable snapshot pagination, and clean file presentation across millions of indexed media files.
 
 ---
 
-## ⚡ Option A: SQLite FTS5 with Trigram Tokenizer Architecture
+## ⚡ Runtime Search & Relevance Architecture
 
-Traditional MongoDB AutoFilter bots rely on unanchored regex queries (`re.compile(".*".join(words))`), forcing complete collection scans across hundreds of thousands of documents. This causes 1–2 second query delays and MongoDB CPU spikes under high concurrency.
+The active runtime search path executes directly against MongoDB (`Media` and `Media2` collections) with zero external database dependencies:
 
-### How Option A Solves This:
-1. **Trigram Indexing (`tokenize='trigram'`):** SQLite FTS5 indexes 3-character rolling substrings, allowing instant wildcard/substring matches (`Avengers`, `1080p`, `Hindi`) directly in inverted index trees.
-2. **Sub-3ms Query Latency:** Searches execute locally in WAL mode (`media_fts.sqlite3`) in ~1–3 ms with zero network latency.
-3. **Dual-Engine Graceful Fallback:** 
-   - Primary: SQLite FTS5 Trigram virtual table.
-   - Fallback: MongoDB regex search executes automatically if FTS yields 0 results or during cold-start.
-4. **Automated Synchronization:**
-   - Any new file indexed with `save_file` is immediately committed to both MongoDB and the SQLite FTS catalog.
-   - Built-in background sync worker (`sync_mongo_to_fts()`) backfills pre-existing MongoDB records into SQLite on bot startup without blocking.
+1. **Selective $and Predicates:** Structured token boundary matching for Title, Year, Quality, Season, Episode, and Language.
+2. **Deterministic Relevance Scoring:** 6-tier scoring model prioritizing exact title and release year matches while preserving movie and series title overlaps.
+3. **Multi-DB Global Merging:** Concurrent candidate retrieval across Primary and Secondary MongoDB clusters with unified ranking.
+4. **Stable Snapshot Pagination:** Candidate snapshots are retained per search session, preventing Page 2 reshuffles and eliminating redundant database counts.
+5. **Session Isolation & Concurrency Coordination:** Monotonically increasing revision numbers discard stale, out-of-order callback responses during rapid button taps.
+6. **Local Indexing Sidecar:** SQLite catalog functions exist for auxiliary indexing without blocking or intercepting the primary MongoDB search path.
 
 ---
 

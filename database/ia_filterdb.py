@@ -3,6 +3,7 @@ from database.search_engine import (
     build_mongo_search_query,
     parse_user_query,
     rank_media_results,
+    SearchRequest,
     GLOBAL_SEARCH_CACHE,
     GLOBAL_SEARCH_ANALYTICS,
 )
@@ -528,7 +529,7 @@ async def _fetch_candidates(model, filter_query, limit_val):
         raw_list = await model.collection.find(filter_query).limit(limit_val).to_list(length=limit_val)
         return [model.build_from_mongo(d) for d in raw_list]
 
-async def get_search_results(chat_id, query, file_type=None, max_results=None, offset=0, filter=False):
+async def get_search_results(chat_id, query, file_type=None, max_results=None, offset=0, filter=False, session=None):
     t_start = time.time()
     if chat_id is not None:
         settings = await get_settings(int(chat_id))
@@ -542,20 +543,50 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
     if max_results is None:
         max_results = 10
 
-    # Parse query representation for cache and ranking
-    if isinstance(query, dict):
+    # Parse into canonical SearchRequest contract
+    if isinstance(query, SearchRequest):
+        parsed = query
+        base_search = parsed.raw_query
+        f_dict = parsed.explicit_filters
+    elif isinstance(query, dict):
         base_search = query.get("search", "")
         f_dict = {k: v for k, v in query.items() if k != "search" and v is not None}
         parsed = parse_user_query(base_search)
+        parsed.explicit_filters = f_dict
     else:
         base_search = str(query or "")
         f_dict = {}
         parsed = parse_user_query(base_search)
 
-    query_norm = (parsed.get("title") or base_search).strip().lower()
+    # 1. Fast Path: If session already has a stable ranked snapshot for this exact filter state, serve from snapshot
+    if session and session.snapshot_candidates and offset > 0:
+        ranked_candidates = session.snapshot_candidates
+        ranked_snapshot_count = session.ranked_snapshot_count or len(ranked_candidates)
+        files = ranked_candidates[offset:offset + max_results]
+        next_offset = str(offset + len(files)) if (offset + len(files) < ranked_snapshot_count) else ""
+        duration_ms = (time.time() - t_start) * 1000
+        GLOBAL_SEARCH_ANALYTICS.record_search(base_search, ranked_snapshot_count, duration_ms, f_dict)
+        return files, next_offset, ranked_snapshot_count
 
-    # Check search cache (Section 11.D)
-    cached = GLOBAL_SEARCH_CACHE.get(query_norm, f_dict, offset, max_results)
+    # 2. Check search cache (Section 5)
+    db_mode_str = "multi" if MULTIPLE_DB else "single"
+    query_norm = (parsed.normalized_title or base_search).strip().lower()
+    cache_key = GLOBAL_SEARCH_CACHE.make_key(
+        query_norm=query_norm,
+        filters=f_dict,
+        offset=offset,
+        max_results=max_results,
+        year=parsed.year,
+        language=parsed.language,
+        quality=parsed.quality,
+        season=parsed.season,
+        episode=parsed.episode,
+        universal_audio=parsed.universal_audio,
+        file_type=file_type,
+        db_mode=db_mode_str,
+        sort_version=parsed.sort_version,
+    )
+    cached = GLOBAL_SEARCH_CACHE.get(cache_key)
     if cached is not None:
         c_files, c_next, c_total = cached
         duration_ms = (time.time() - t_start) * 1000
@@ -566,34 +597,76 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
     if not filter_mongo:
         return [], "", 0
 
-    # MongoDB search execution (preserving async design, no SQLite FTS5)
-    limit = max_results + 1
-    fetch_limit = max(offset + limit, 100)
+    # 3. MongoDB Search & Multi-Tier Candidate Ranking
+    CANDIDATE_EXAMINATION_BUDGET = 300
     if not MULTIPLE_DB:
         count_task = Media.count_documents(filter_mongo)
-        find_task = _fetch_candidates(Media, filter_mongo, fetch_limit)
-        total_results, raw_candidates = await asyncio.gather(count_task, find_task)
+        find_task = _fetch_candidates(Media, filter_mongo, CANDIDATE_EXAMINATION_BUDGET)
+        total_matched, raw_candidates = await asyncio.gather(count_task, find_task)
+        candidate_docs_examined = len(raw_candidates)
         ranked_candidates = rank_media_results(raw_candidates, parsed)
-        files = ranked_candidates[offset:offset + max_results]
-        next_offset = str(offset + len(files)) if (offset + len(files) < total_results) else ""
+        ranked_snapshot_count = len(ranked_candidates)
+        result_scope = "complete" if total_matched <= candidate_docs_examined else "bounded/partial"
     else:
         count1_task = Media.count_documents(filter_mongo)
         count2_task = Media2.count_documents(filter_mongo)
         count1, count2 = await asyncio.gather(count1_task, count2_task)
-        total_results = count1 + count2
-        task1 = _fetch_candidates(Media, filter_mongo, fetch_limit)
-        task2 = _fetch_candidates(Media2, filter_mongo, fetch_limit)
+        total_matched = count1 + count2
+        task1 = _fetch_candidates(Media, filter_mongo, CANDIDATE_EXAMINATION_BUDGET)
+        task2 = _fetch_candidates(Media2, filter_mongo, CANDIDATE_EXAMINATION_BUDGET)
         raw1, raw2 = await asyncio.gather(task1, task2)
-        combined_raw = raw1 + raw2
+        # Deduplicate identical file_id at merge time (never by title)
+        seen_ids = set()
+        combined_raw = []
+        for d in (raw1 + raw2):
+            fid = getattr(d, "file_id", None)
+            if fid not in seen_ids:
+                seen_ids.add(fid)
+                combined_raw.append(d)
+        candidate_docs_examined = len(combined_raw)
         ranked_candidates = rank_media_results(combined_raw, parsed)
-        files = ranked_candidates[offset:offset + max_results]
-        next_offset = str(offset + len(files)) if (offset + len(files) < total_results) else ""
+        ranked_snapshot_count = len(ranked_candidates)
+        result_scope = "complete" if total_matched <= candidate_docs_examined else "bounded/partial"
+
+    # Save stable snapshot to session if provided
+    if session:
+        session.set_snapshot(
+            candidates=ranked_candidates,
+            total_matched=total_matched,
+            examined=candidate_docs_examined,
+            ranked_count=ranked_snapshot_count,
+            scope=result_scope,
+        )
+
+    files = ranked_candidates[offset:offset + max_results]
+    next_offset = str(offset + len(files)) if (offset + len(files) < ranked_snapshot_count) else ""
+
+    # Populate cache for current and subsequent pages of this snapshot
+    GLOBAL_SEARCH_CACHE.set(cache_key, files, ranked_snapshot_count)
+    if ranked_snapshot_count > max_results:
+        for p_off in range(max_results, min(ranked_snapshot_count, max_results * 5), max_results):
+            sub_key = GLOBAL_SEARCH_CACHE.make_key(
+                query_norm=query_norm,
+                filters=f_dict,
+                offset=p_off,
+                max_results=max_results,
+                year=parsed.year,
+                language=parsed.language,
+                quality=parsed.quality,
+                season=parsed.season,
+                episode=parsed.episode,
+                universal_audio=parsed.universal_audio,
+                file_type=file_type,
+                db_mode=db_mode_str,
+                sort_version=parsed.sort_version,
+            )
+            sub_slice = ranked_candidates[p_off:p_off + max_results]
+            GLOBAL_SEARCH_CACHE.set(sub_key, sub_slice, ranked_snapshot_count)
 
     duration_ms = (time.time() - t_start) * 1000
-    GLOBAL_SEARCH_CACHE.set(query_norm, f_dict, offset, max_results, files, total_results)
-    GLOBAL_SEARCH_ANALYTICS.record_search(base_search, total_results, duration_ms, f_dict)
+    GLOBAL_SEARCH_ANALYTICS.record_search(base_search, ranked_snapshot_count, duration_ms, f_dict)
 
-    return files, next_offset, total_results
+    return files, next_offset, ranked_snapshot_count
 
 async def get_bad_files(query, file_type=None):
     query = query.strip()
